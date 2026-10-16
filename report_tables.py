@@ -1,4 +1,4 @@
-"""Print the markdown tables used in REPORT.md sections 3-5 and MANUAL.md section 7
+"""Print the markdown tables used in REPORT.md sections 3-5
 from a benchmark log, so the report can be refreshed after every rerun:
 
     python report_tables.py logs/bench_final.json

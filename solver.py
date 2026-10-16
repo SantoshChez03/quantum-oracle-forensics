@@ -44,6 +44,8 @@ RANDFUN_P = 0.3
 ECHO_JS = (1, 2, 4)
 SEARCH_JS = (6, 8, 10, 12)
 MAX_QUBITS = 20
+SEED = 2026             # solver's own randomness (choice of classical-query inputs) is fixed,
+                        # so a run is reproducible whenever run() itself is seeded
 
 M1_FAMILIES = ("constant", "linear", "grover", "balanced", "randfun")
 M8_FAMILIES = ("simon", "simon2", "perm")
@@ -246,6 +248,10 @@ class M1Model:
         self.q_rand = np.arange(N + 1) / N
         self.design_kernels = [_readout_kernel(n, _design_eps(eps, g_copies)) for _, eps in NOISE_LEVELS]
         self.search_hits = {}          # x -> j of the Grover-search shot that returned x
+        # classical reads per input x: f(x) is fixed, so repeated reads of the same x are
+        # independent only GIVEN f(x).  For balanced / randfun atoms f(x) is uncertain, so
+        # all reads of one x enter through log[pi L1 + (1 - pi) L0] (see _classical_update).
+        self.reads = {}                # x -> {"logL": (L, 2) array, "contrib": (L, B) array}
         self._cache = {}
 
     # -- exact true-outcome distributions P[atom, z] of G(j, readout) per noise level
@@ -303,9 +309,9 @@ class M1Model:
             P = self.true_dist(exp[1], exp[2])
             return np.stack([(1 - FLOOR) * Pl @ K.T + FLOOR / self.N
                              for Pl, K in zip(P, self.design_kernels)])
-        pf = self.p_one(exp[1])
         out = []
-        for pm, eps in NOISE_LEVELS:
+        for li, (pm, eps) in enumerate(NOISE_LEVELS):
+            pf = self.p_one_given_reads(exp[1], li)
             e = _design_eps(eps, self.c_copies)
             p1 = pm * exp[2] + (1 - pm) * (pf if exp[2] == 0 else 1 - pf)
             p1 = p1 * (1 - e) + (1 - p1) * e
@@ -337,17 +343,46 @@ class M1Model:
                 P = self.true_dist(exp[1], exp[2])[li]
                 like = (1 - FLOOR) * (P @ gvec) + FLOOR * gvec.mean()
             else:
-                rs = [(v >> c) & 1 for c in range(self.c_copies)]
-                g0, g1 = _per_bit([rs], eps)
-                pf = self.p_one(exp[1])
-                y0 = exp[2]
-                p1 = pm * y0 + (1 - pm) * (pf if y0 == 0 else 1 - pf)
-                like = (1 - FLOOR) * (p1 * g1[0] + (1 - p1) * g0[0]) + FLOOR * 0.5 * (g0[0] + g1[0])
+                return self._classical_update(exp, v)
             loglik.append(np.log(like))
         self.logw += np.stack(loglik)
         if exp[0] == "G" and not exp[2]:
             x = int(np.argmax(gvec))                 # most likely measured input
             self.search_hits[x] = max(self.search_hits.get(x, 0), exp[1])
+
+    def p_one_given_reads(self, x, li):
+        """P(f(x) = 1) per atom after the reads of x seen so far (noise level li)."""
+        pi = self.p_one(x)
+        if x not in self.reads:
+            return pi
+        l0, l1 = self.reads[x]["logL"][li]
+        r = np.exp(np.clip(l1 - l0, -700, 700))          # likelihood ratio L1 / L0
+        return pi * r / (pi * r + (1 - pi))
+
+    def _classical_update(self, exp, v):
+        """Classical read of f(x).  Given f(x) = u, one read has likelihood
+            l_u = (1 - FLOOR) [pm g(y0) + (1 - pm) g(y0 xor u)] + FLOOR (g0 + g1) / 2
+        and reads are independent; all reads of x together contribute
+            log[ pi L1 + (1 - pi) L0 ],  L_u = prod over reads of l_u,  pi = P(f(x) = 1 | atom).
+        For constant / linear / grover pi is 0 or 1, so this is the usual product; for
+        balanced / randfun it stops repeated reads of one x from counting as fresh samples."""
+        x, y0 = exp[1], exp[2]
+        rs = [(v >> c) & 1 for c in range(self.c_copies)]
+        rec = self.reads.setdefault(x, {"logL": np.zeros((len(NOISE_LEVELS), 2)),
+                                        "contrib": np.zeros_like(self.logw)})
+        pi = self.p_one(x)
+        new = np.empty_like(self.logw)
+        for li, (pm, eps) in enumerate(NOISE_LEVELS):
+            g0, g1 = _per_bit([rs], eps)
+            g = (g0[0], g1[0])
+            for u in (0, 1):
+                l_u = (1 - FLOOR) * (pm * g[y0] + (1 - pm) * g[y0 ^ u]) + FLOOR * 0.5 * (g[0] + g[1])
+                rec["logL"][li, u] += np.log(l_u)
+            l0, l1 = rec["logL"][li]
+            with np.errstate(divide="ignore"):
+                new[li] = np.logaddexp(np.log(pi) + l1, np.log1p(-pi) + l0)
+        self.logw += new - rec["contrib"]
+        rec["contrib"] = new
 
     def answer_posterior(self):
         w = _normalise_log(self.logw.ravel()).reshape(self.logw.shape).sum(0)
@@ -540,5 +575,5 @@ def solve_m8(n, m, budget, families, run, first_batch=6, delta=DELTA, readout_co
 # ----------------------------------------------------------------------------- entry point
 def solve(n, m, budget, families, run):
     if m == 1:
-        return solve_m1(n, budget, families, run)
+        return solve_m1(n, budget, families, run, rng=np.random.default_rng(SEED))
     return solve_m8(n, m, budget, families, run)

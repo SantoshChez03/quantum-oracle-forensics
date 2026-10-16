@@ -104,17 +104,22 @@ def measured_distribution(circuit, f, n, fired, cache=None):
     cache = {} if cache is None else cache
     S = _LazyState()
     measures = []
+    measured = set()
     k_oracle = 0
     for inst in circuit.data:
         op = inst.operation
         qs = [circuit.find_bit(q).index for q in inst.qubits]
         name = op.name
+        if name not in ("measure", "barrier") and measured.intersection(qs):
+            raise ValueError("gate after measurement: section 3 requires measurements "
+                             "at the end of a circuit")
         if name == "oracle":
             if fired[k_oracle]:
                 S.apply_oracle(f, qs[:n], qs[n:], cache)
             k_oracle += 1
         elif name == "measure":
             measures.append((qs[0], circuit.find_bit(inst.clbits[0]).index))
+            measured.add(qs[0])
         elif name in ("barrier", "id", "delay"):
             continue
         elif (isinstance(op, ControlledGate) and op.base_gate.name == "x"

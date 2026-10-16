@@ -13,8 +13,10 @@ eight families it belongs to and recover its secret.
 | `sim/runner.py` | local `run(circuit, shots)`: numpy state-vector simulator with the section-3 noise model (oracle misfire, readout flips), Qiskit bit order and budget enforcement |
 | `baselines.py` | section-9 baselines: classical-only, single-algorithm, non-adaptive, random guess |
 | `bench.py` | accuracy, worst-family accuracy, query saving, stress noise, confusion matrix, accuracy vs budget; writes `logs/` |
-| `tests/` | simulator checks against section 4, bit-order checks, model-vs-simulator checks, solver smoke tests |
-| `logs/` | benchmark outputs referenced by the report |
+| `tests/` | simulator checks against section 4, bit-order checks, model-vs-simulator checks, simulator vs Qiskit `Statevector`, rule checks (measurement at end, ≤ 20 qubits, allowed imports), solver smoke tests |
+| `logs/` | benchmark outputs referenced by the report (`summary_final.md` is the one the report cites) |
+| `report_tables.py` | prints the report tables from `logs/bench_final.json`, so the report and the logs stay in sync |
+| `reference/claude_solver.py` | an independently written second solver, used only for paired comparison (`bench.py --reference`) |
 
 `solver.py` imports only Qiskit, numpy, scipy and the standard library. It never imports
 `sim/`; the oracle is reached only through `run()`.
@@ -22,6 +24,8 @@ eight families it belongs to and recover its secret.
 ## Setup
 
 ```bash
+git clone https://github.com/SantoshChez03/quantum-oracle-forensics.git
+cd quantum-oracle-forensics
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt -r requirements-dev.txt   # Windows
 # .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt    # Linux / macOS
@@ -33,8 +37,9 @@ Tested with Python 3.14, Qiskit 2.5.2, numpy 2.5.4, scipy 1.18.1.
 
 ```bash
 python -m pytest -q                                   # tests
-python bench.py --per-family 50 --workers 8           # full benchmark -> logs/
+python bench.py --per-family 50 --workers 8 --tag final   # full benchmark -> logs/
 python bench.py --per-family 10 --only ours,ours_stress   # quick check
+python bench.py --per-family 50 --tag final --reference   # also run reference/claude_solver.py on the same oracles
 ```
 
 Use from a judge harness:

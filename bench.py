@@ -2,8 +2,11 @@
 confusion matrix and accuracy-vs-budget (section 9).  Writes logs/bench_<tag>.json (one
 record per task) and logs/summary_<tag>.md.
 
-    python bench.py --per-family 50 --workers 8
+    python bench.py --per-family 50 --workers 8 --tag final
     python bench.py --per-family 10 --only ours          # quick check
+    python bench.py --per-family 50 --tag final --reference          # + reference solver
+    # after a change that only affects m = 1, rerun just those records in place:
+    python bench.py --tag final --update --only ours,ours_stress --families constant,balanced,linear,grover,randfun
 """
 import argparse
 import json
@@ -15,11 +18,29 @@ import numpy as np
 
 import baselines
 import solver
+from reference import claude_solver
 from sim.oracles import FAMILIES, random_oracle
 from sim.runner import BudgetExceeded, OracleRunner
 
 NOMINAL = (0.04, 0.02)
 STRESS = (0.08, 0.04)
+
+EXPERIMENTS_ALL = {   # name -> (strategy, noise, budget)
+    "ours": ("ours", NOMINAL, 60),
+    "ours_stress": ("ours", STRESS, 60),
+    "ours_budget20": ("ours", NOMINAL, 20),
+    "ours_budget30": ("ours", NOMINAL, 30),
+    "ours_budget40": ("ours", NOMINAL, 40),
+    "ours_budget50": ("ours", NOMINAL, 50),
+    "no_readout_copies": ("ours_no_readout_copies", NOMINAL, 60),
+    "no_readout_copies_stress": ("ours_no_readout_copies", STRESS, 60),
+    "non_adaptive": ("non_adaptive", NOMINAL, 60),
+    "single_algorithm": ("single_algorithm", NOMINAL, 60),
+    "classical_only": ("classical_only", NOMINAL, 60),
+    "random_guess": ("random_guess", NOMINAL, 60),
+    "claude_reference": ("claude_reference", NOMINAL, 60),          # only with --reference
+    "claude_reference_stress": ("claude_reference", STRESS, 60),    # only with --reference
+}
 
 
 DELTA = solver.DELTA
@@ -43,6 +64,9 @@ STRATEGIES = {
     "single_algorithm": baselines.single_algorithm,
     "non_adaptive": baselines.non_adaptive,
     "random_guess": baselines.random_guess,
+    # independent second solver (reference/claude_solver.py), for a paired comparison
+    "claude_reference": lambda n, m, budget, families, run, rng:
+        claude_solver.solve(n, m, budget, families, run),
 }
 
 
@@ -99,34 +123,46 @@ def main():
     ap.add_argument("--tag", default=time.strftime("%Y%m%d_%H%M%S"))
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--delta", type=float, default=solver.DELTA, help="stopping threshold for 'ours'")
+    ap.add_argument("--families", default=None,
+                    help="comma-separated subset of families (default: all eight)")
+    ap.add_argument("--update", action="store_true",
+                    help="merge into the existing logs/bench_<tag>.json: rerun only the selected "
+                         "experiments/families and keep every other record")
+    ap.add_argument("--reference", action="store_true",
+                    help="also run reference/claude_solver.py on the same oracles")
     args = ap.parse_args()
 
-    experiments = {   # name -> (strategy, noise, budget)
-        "ours": ("ours", NOMINAL, 60),
-        "ours_stress": ("ours", STRESS, 60),
-        "ours_budget20": ("ours", NOMINAL, 20),
-        "ours_budget30": ("ours", NOMINAL, 30),
-        "ours_budget40": ("ours", NOMINAL, 40),
-        "ours_budget50": ("ours", NOMINAL, 50),
-        "no_readout_copies": ("ours_no_readout_copies", NOMINAL, 60),
-        "no_readout_copies_stress": ("ours_no_readout_copies", STRESS, 60),
-        "non_adaptive": ("non_adaptive", NOMINAL, 60),
-        "single_algorithm": ("single_algorithm", NOMINAL, 60),
-        "classical_only": ("classical_only", NOMINAL, 60),
-        "random_guess": ("random_guess", NOMINAL, 60),
-    }
+    selected = [k for k in EXPERIMENTS_ALL if not k.startswith("claude_reference") or args.reference]
     if args.only:
-        experiments = {k: v for k, v in experiments.items() if k in args.only.split(",")}
+        selected = [k for k in selected if k in args.only.split(",")]
+    rerun = set(selected)
 
+    fams = tuple(args.families.split(",")) if args.families else FAMILIES
     os.makedirs("logs", exist_ok=True)
     all_records, summaries = {}, {}
+    if args.update:
+        with open(f"logs/bench_{args.tag}.json") as fh:
+            old = json.load(fh)
+        all_records = old["records"]
+        args.per_family = old["args"]["per_family"]
+        args.seed = old["args"]["seed"]
+    elif fams != FAMILIES:
+        raise SystemExit("--families needs --update (it replaces part of an existing log)")
+    experiments = {k: v for k, v in EXPERIMENTS_ALL.items() if k in rerun or k in all_records}
     with Pool(args.workers, initializer=_set_delta, initargs=(args.delta,)) as pool:
         for name, (strategy, noise, budget) in experiments.items():
             t0 = time.time()
             # same oracle seeds for every experiment -> paired comparison
-            jobs = [(strategy, fam, args.seed + 1000 * k + i, noise, budget)
-                    for k, fam in enumerate(FAMILIES) for i in range(args.per_family)]
-            recs = pool.map(run_task, jobs, chunksize=1)
+            if name in rerun:
+                jobs = [(strategy, fam, args.seed + 1000 * k + i, noise, budget)
+                        for k, fam in enumerate(FAMILIES) if fam in fams
+                        for i in range(args.per_family)]
+                new = pool.map(run_task, jobs, chunksize=1)
+                keep = [r for r in all_records.get(name, []) if r["family"] not in fams]
+                order = {f: i for i, f in enumerate(FAMILIES)}
+                recs = sorted(keep + new, key=lambda r: (order[r["family"]], r["seed"]))
+            else:
+                recs = all_records[name]
             all_records[name] = recs
             summaries[name] = summarize(recs, 60)
             s = summaries[name]
